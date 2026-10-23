@@ -1,0 +1,4 @@
+fixtures>=3.0.0 # Apache-2.0/BSD
+pytest>=7.0 # MIT
+pytest-cov>=4.0 # MIT
+requests-mock>=1.2.0 # Apache-2.0
