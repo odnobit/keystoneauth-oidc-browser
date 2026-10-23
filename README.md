@@ -6,7 +6,7 @@ Keystone tokens between runs. It extends upstream `v3oidcauthcode`: the browser 
 no usable token is cached.
 
 * **Auth type:** `v3oidcbrowser`
-* **Requires:** Python 3.10+, keystoneauth1 5.9.0+
+* **Requires:** Python 3.9+, keystoneauth1 5.9.0+
 
 ## Installation
 
