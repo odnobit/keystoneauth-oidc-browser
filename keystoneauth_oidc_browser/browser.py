@@ -4,6 +4,8 @@ Opens the identity provider's login page and catches the redirect on a
 one-shot HTTP server on localhost. Standard library only.
 """
 
+from __future__ import annotations
+
 import base64
 import hashlib
 import http.server

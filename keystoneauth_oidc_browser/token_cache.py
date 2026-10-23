@@ -16,6 +16,8 @@ Any failure of the store is reported as a miss or ignored. A broken cache
 must never stand in the way of authenticating.
 """
 
+from __future__ import annotations
+
 import base64
 import binascii
 import hashlib

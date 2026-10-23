@@ -12,6 +12,8 @@ clouds behind one identity provider never see each other's tokens:
   authentication requests at all.
 """
 
+from __future__ import annotations
+
 import hashlib
 import json
 import logging
