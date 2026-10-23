@@ -186,8 +186,14 @@ class FileTokenCache:
         self._unlink(path)
         return None
 
-    def set(self, key: str, state: str, expires_at: float) -> None:
-        """Store ``state`` under ``key`` until ``expires_at`` (a UNIX time)."""
+    def set(
+        self, key: str, state: str, expires_at: float, group: str | None = None
+    ) -> None:
+        """Store ``state`` under ``key`` until ``expires_at`` (a UNIX time).
+
+        Entries stored with the same ``group`` can be removed together with
+        :py:meth:`delete_group`.
+        """
         if not self._ensure_dir():
             return
 
@@ -209,6 +215,8 @@ class FileTokenCache:
                 "nonce": base64.b64encode(nonce).decode("ascii"),
                 "ciphertext": base64.b64encode(ciphertext).decode("ascii"),
             }
+        if group is not None:
+            entry["group"] = self._name(group)
         path = self._path(key)
         tmp_path = None
         try:
@@ -234,9 +242,28 @@ class FileTokenCache:
             return
         self._unlink(self._path(key))
 
+    def delete_group(self, group: str) -> None:
+        """Remove every entry stored with ``group``."""
+        if not self._ensure_dir():
+            return
+        name = self._name(group)
+        for path, entry in self._entries():
+            if entry.get("group") == name:
+                self._unlink(path)
+
     def purge_expired(self) -> None:
         """Remove entries whose token has expired."""
         now = time.time()
+        for path, entry in self._entries():
+            try:
+                expires_at = float(entry["expires_at"])
+            except (ValueError, TypeError, KeyError):
+                continue
+            if expires_at <= now:
+                self._unlink(path)
+
+    def _entries(self):
+        """Yield ``(path, entry)`` for every readable entry."""
         try:
             names = os.listdir(self.cache_dir)
         except OSError:
@@ -248,11 +275,11 @@ class FileTokenCache:
             path = os.path.join(self.cache_dir, name)
             try:
                 with open(path, encoding="utf-8") as f:
-                    expires_at = float(json.load(f)["expires_at"])
-            except (OSError, ValueError, TypeError, KeyError):
+                    entry = json.load(f)
+            except (OSError, ValueError):
                 continue
-            if expires_at <= now:
-                self._unlink(path)
+            if isinstance(entry, dict):
+                yield path, entry
 
     @staticmethod
     def _unlink(path: str) -> None:

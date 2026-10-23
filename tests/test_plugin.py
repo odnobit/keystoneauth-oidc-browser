@@ -55,6 +55,7 @@ class Keystone:
             json=fixture.V3Token(expires=_expires(ttl)),
             headers={"X-Subject-Token": UNSCOPED_TOKEN},
         )
+        self.validate = requests_mock.head(auth_url + "/auth/tokens", status_code=200)
         self.set_rescope(ttl)
 
     def set_rescope(self, ttl=3600, status=201):
@@ -151,7 +152,7 @@ def test_first_run_caches_both_tokens(keystone, cache_dir):
         assert os.stat(os.path.join(cache_dir, name)).st_mode & 0o777 == 0o600
 
 
-def test_second_run_needs_no_code_and_no_requests(keystone, cache_dir):
+def test_second_run_needs_no_code_and_only_validates(keystone, cache_dir):
     authenticate(make_plugin(cache_dir))
     keystone.mock.reset_mock()
 
@@ -159,7 +160,44 @@ def test_second_run_needs_no_code_and_no_requests(keystone, cache_dir):
 
     assert auth_ref.auth_token == SCOPED_TOKEN
     assert auth_ref.project_id == "p-id"
-    assert keystone.mock.call_count == 0
+    assert keystone.mock.call_count == 1
+    assert keystone.validate.call_count == 1
+    headers = keystone.validate.last_request.headers
+    assert headers["X-Subject-Token"] == SCOPED_TOKEN
+
+
+@pytest.mark.parametrize("status", [401, 404])
+def test_revoked_cached_token_logs_in_again(keystone, cache_dir, fake_browser, status):
+    authenticate(make_plugin(cache_dir))
+    keystone.validate = keystone.mock.head(RESCOPE_URL, status_code=status)
+    keystone.mock.reset_mock()
+
+    plugin = make_plugin(cache_dir, code=None)
+    auth_ref = authenticate(plugin)
+
+    assert auth_ref.auth_token == SCOPED_TOKEN
+    assert len(fake_browser.queries) == 1
+    assert keystone.federated.call_count == 1
+    assert plugin.token_cache.get(plugin._unscoped_key()) is not None
+    assert plugin.token_cache.get(plugin._scoped_key()) is not None
+
+
+@pytest.mark.parametrize(
+    "response",
+    [{"status_code": 503}, {"exc": ks_exceptions.ConnectFailure}],
+)
+def test_unvalidated_cached_token_is_still_used(
+    keystone, cache_dir, fake_browser, response
+):
+    authenticate(make_plugin(cache_dir))
+    keystone.mock.head(RESCOPE_URL, **response)
+    keystone.mock.reset_mock()
+
+    auth_ref = authenticate(make_plugin(cache_dir, code=None))
+
+    assert auth_ref.auth_token == SCOPED_TOKEN
+    assert fake_browser.queries == []
+    assert keystone.rescope.call_count == 0
 
 
 def test_other_project_rescopes_the_cached_unscoped_token(keystone, cache_dir):
@@ -188,7 +226,7 @@ def test_switching_projects_back_and_forth_uses_cache(keystone, cache_dir):
     authenticate(make_plugin(cache_dir, code=None))
     authenticate(make_plugin(cache_dir, code=None, project_name="other"))
 
-    assert keystone.mock.call_count == 0
+    assert keystone.mock.call_count == keystone.validate.call_count == 2
     assert len(os.listdir(cache_dir)) == 3
 
 
@@ -224,7 +262,7 @@ def test_nearly_expired_tokens_are_not_reused(requests_mock, cache_dir):
     keystone.mock.reset_mock()
 
     authenticate(make_plugin(cache_dir, code=None, token_cache_min_ttl=100))
-    assert keystone.mock.call_count == 0
+    assert keystone.mock.call_count == keystone.validate.call_count == 1
 
 
 def test_browser_login_public_client_on_a_free_port(keystone, cache_dir, fake_browser):
@@ -375,43 +413,49 @@ def test_used_code_is_not_exchanged_again(keystone, cache_dir, fake_browser):
     authenticate(plugin)
     plugin.invalidate()
     keystone.mock.reset_mock()
-    good = fixture.V3Token(expires=_expires(3600), project_name="proj")
-    keystone.mock.post(
-        RESCOPE_URL,
-        [
-            {"status_code": 401, "json": {}},
-            {"status_code": 201, "json": good, "headers": {"X-Subject-Token": "new"}},
-        ],
-    )
 
-    assert authenticate(plugin).auth_token == "new"
+    assert authenticate(plugin).auth_token == SCOPED_TOKEN
     assert len(fake_browser.queries) == 1
     assert "once" not in keystone.idp_token.last_request.text
 
 
-def test_invalidate_drops_only_the_scoped_token(keystone, cache_dir):
+def test_invalidate_drops_both_tokens(keystone, cache_dir):
     plugin = make_plugin(cache_dir)
     authenticate(plugin)
 
     assert plugin.invalidate()
+    assert os.listdir(cache_dir) == []
+
+
+def test_logout_drops_tokens_of_every_project(keystone, cache_dir, fake_browser):
+    authenticate(make_plugin(cache_dir))
+    authenticate(make_plugin(cache_dir, code=None, project_name="other"))
+    other_cloud = make_plugin(cache_dir, code=None, auth_url=OTHER_AUTH_URL)
+    other_cloud.token_cache.set(other_cloud._unscoped_key(), "{}", 2**31, group="x")
+    assert len(os.listdir(cache_dir)) == 4
+
+    make_plugin(cache_dir, code=None).invalidate()
+
     assert len(os.listdir(cache_dir)) == 1
-    assert plugin.token_cache.get(plugin._unscoped_key()) is not None
+    authenticate(make_plugin(cache_dir, code=None, project_name="other"))
+    assert len(fake_browser.queries) == 1
 
 
-def test_cached_unscoped_is_kept_after_invalidate(keystone, cache_dir, fake_browser):
+def test_invalidate_logs_in_again(keystone, cache_dir, fake_browser):
     authenticate(make_plugin(cache_dir))
     keystone.mock.reset_mock()
 
     plugin = make_plugin(cache_dir, code=None, project_name="other")
     authenticate(plugin)
+    assert fake_browser.queries == []
     plugin.invalidate()
     authenticate(plugin)
 
-    assert fake_browser.queries == []
-    assert keystone.rescope.call_count == 2
+    assert len(fake_browser.queries) == 1
+    assert keystone.federated.call_count == 1
 
 
-def test_service_401_rescopes_without_login(keystone, cache_dir, fake_browser):
+def test_service_401_logs_in_again(keystone, cache_dir, fake_browser):
     authenticate(make_plugin(cache_dir))
     keystone.mock.reset_mock()
     servers = keystone.mock.get(
@@ -423,32 +467,9 @@ def test_service_401_rescopes_without_login(keystone, cache_dir, fake_browser):
     session.Session(auth=plugin).get("https://compute.example.com/servers")
 
     assert servers.call_count == 2
-    assert keystone.rescope.call_count == 1
-    assert fake_browser.queries == []
-
-
-def test_service_401_with_revoked_unscoped_logs_in_again(
-    keystone, cache_dir, fake_browser
-):
-    authenticate(make_plugin(cache_dir))
-    servers = keystone.mock.get(
-        "https://compute.example.com/servers",
-        [{"status_code": 401}, {"status_code": 200, "json": {}}],
-    )
-    good = fixture.V3Token(expires=_expires(3600), project_name="proj")
-    keystone.mock.post(
-        RESCOPE_URL,
-        [
-            {"status_code": 401, "json": {}},
-            {"status_code": 201, "json": good, "headers": {"X-Subject-Token": "new"}},
-        ],
-    )
-
-    plugin = make_plugin(cache_dir, code=None)
-    session.Session(auth=plugin).get("https://compute.example.com/servers")
-
-    assert servers.call_count == 2
     assert len(fake_browser.queries) == 1
+    assert keystone.federated.call_count == 1
+    assert keystone.rescope.call_count == 1
 
 
 def test_cache_can_be_disabled(keystone, cache_dir):

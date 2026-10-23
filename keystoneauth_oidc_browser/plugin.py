@@ -8,8 +8,12 @@ clouds behind one identity provider never see each other's tokens:
 
 * the federated **unscoped** token, keyed without any scope, so it can be
   rescoped to any project without going back to the identity provider;
-* the **scoped** token, keyed with the scope, so a repeated command makes no
-  authentication requests at all.
+* the **scoped** token, keyed with the scope, so a repeated command only asks
+  Keystone, once, whether the cached token is still valid.
+
+A cached token that Keystone reports revoked (``openstack token revoke``), or
+a ``401`` from any service, drops both tokens: the next login goes through the
+browser again.
 """
 
 from __future__ import annotations
@@ -166,11 +170,40 @@ class OidcAuthorizationCodeCached(OidcAuthorizationCode):
         if self.token_cache is None or auth_ref.expires is None:
             return
         state = json.dumps({"auth_token": auth_ref.auth_token, "body": auth_ref._data})
-        self.token_cache.set(key, state, auth_ref.expires.timestamp())
+        self.token_cache.set(
+            key, state, auth_ref.expires.timestamp(), group=self._unscoped_key()
+        )
 
     def _forget(self, key: str) -> None:
         if self.token_cache is not None:
             self.token_cache.delete(key)
+
+    def _logout(self) -> None:
+        """Drop every cached token of this login, whatever its scope."""
+        self._forget(self._scoped_key())
+        self._forget(self._unscoped_key())
+        if self.token_cache is not None:
+            self.token_cache.delete_group(self._unscoped_key())
+
+    def _is_revoked(self, session, auth_ref: access.AccessInfoV3) -> bool:
+        """Ask Keystone whether a token read from the cache was revoked.
+
+        Anything but a clear "no such token" counts as valid: a broken cache
+        check must never stand in the way of authenticating.
+        """
+        token = auth_ref.auth_token
+        try:
+            resp = session.request(
+                self.auth_url.rstrip("/") + "/auth/tokens",
+                "HEAD",
+                authenticated=False,
+                raise_exc=False,
+                headers={"X-Auth-Token": token, "X-Subject-Token": token},
+            )
+        except ks_exceptions.ClientException as e:
+            LOG.debug("Could not validate the cached token: %s", e)
+            return False
+        return resp.status_code in (401, 404)
 
     def _get_authorization_endpoint(self, session) -> str:
         if self.authorization_endpoint:
@@ -249,8 +282,11 @@ class OidcAuthorizationCodeCached(OidcAuthorizationCode):
 
         auth_ref = self._load(key)
         if auth_ref is not None:
-            LOG.debug("Using the cached token")
-            return auth_ref
+            if not self._is_revoked(session, auth_ref):
+                LOG.debug("Using the cached token")
+                return auth_ref
+            LOG.debug("The cached token was revoked, logging in again")
+            self._logout()
 
         try:
             try:
@@ -268,5 +304,5 @@ class OidcAuthorizationCodeCached(OidcAuthorizationCode):
         return auth_ref
 
     def invalidate(self):
-        self._forget(self._scoped_key())
+        self._logout()
         return super().invalidate()

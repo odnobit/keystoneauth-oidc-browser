@@ -137,6 +137,21 @@ def test_encrypted_entry_without_keyring_is_kept(cache_dir):
     assert os.path.exists(cache._path("k"))
 
 
+def test_delete_group(cache_dir):
+    cache = FileTokenCache(cache_dir)
+    cache.set("a", "1", time.time() + 3600, group="login")
+    cache.set("b", "2", time.time() + 3600, group="login")
+    cache.set("c", "3", time.time() + 3600, group="other")
+    cache.set("d", "4", time.time() + 3600)
+
+    cache.delete_group("login")
+
+    assert cache.get("a") is None
+    assert cache.get("b") is None
+    assert cache.get("c") == "3"
+    assert cache.get("d") == "4"
+
+
 def test_purge_expired(cache_dir):
     cache = FileTokenCache(cache_dir)
     cache.set("old", "state", time.time() - 10)

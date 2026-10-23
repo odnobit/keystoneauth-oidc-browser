@@ -79,15 +79,19 @@ In addition to the upstream `v3oidcauthcode` options:
 ## Token cache
 
 * Tokens are cached per cloud (`auth_url`) and scope. Switching projects rescopes without a
-  browser login. On a `401`, the plugin rescopes, and logs in again only if that fails.
+  browser login.
+* A cached token is checked with Keystone once per command (one `HEAD /v3/auth/tokens`). If
+  it was revoked, or any service answers `401`, every cached token of that login (all
+  projects on that cloud) is deleted and the browser opens again. If Keystone cannot be reached for the check, the cached token
+  is used as is.
 * Tokens are encrypted (AES-256-GCM) with a key stored in the OS keyring
   ([keyring](https://pypi.org/project/keyring/), service `keystoneauth-v3oidcbrowser`, user
   `cache-key`). Without a keyring (e.g. SSH or CI on Linux), tokens are stored in plain text in
   `0600` files, and a warning is logged.
 * The cache is keyed by configuration, not by user. Use a separate `OS_TOKEN_CACHE_DIR` for
   each account on the same cloud.
-* To log out, delete the cache directory, run `openstack token revoke`, or run
-  `keyring del keystoneauth-v3oidcbrowser cache-key`.
+* To log out, run `openstack token revoke $(openstack token issue -f value -c id)`, delete
+  the cache directory, or run `keyring del keystoneauth-v3oidcbrowser cache-key`.
 * Works with the openstacksdk keyring cache (`cache: {auth: true}` in `clouds.yaml`).
 
 ## Development
